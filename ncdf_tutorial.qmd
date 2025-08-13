@@ -173,9 +173,17 @@ gistemp_tnc <- tidync(ghcn_path)
 ## Python 
 
 ```{python}
-eg_path = "~/Downloads/b.e21.B1850cmip6.f09_g17.CESM2-SF-AAER.001.cam.h1.TREFHT.20100101-20141231.nc"
-eg_xr = xr.open_dataset(eg_path)
-eg_xr = eg_xr['TREFHT']
+gistemp_path = "climate-notebooks/gistemp250_GHCNv4.nc"
+gistemp_da = xr.open_dataset(gistemp_path)
+gistemp_da = gistemp_da['tempanomaly']
+
+cesm_path1 = 'climate-notebooks/cesm_demo.nc'
+cesm1_da = xr.open_dataset(cesm_path1)
+cesm1_da = cesm1_da['TREFHT']
+
+cesm_path2 = 'climate-notebooks/cesm_demo2.nc'
+cesm2_da = xr.open_dataset(cesm_path2)
+cesm2_da = cesm2_da['TREFHT']
 ```
 
 :::
@@ -211,7 +219,8 @@ all_cesm_stars <- read_stars(cesm_paths)
 ## Python
 
 ```{python}
-eg_mf = xr.open_mfdataset(string_with_wildcards or [list, of, files])
+cesm_mf = xr.open_mfdataset('climate-notebooks/cesm_demo*.nc')
+cesm_mf = cesm_mf['TREFHT']
 ```
 
 :::
@@ -256,7 +265,11 @@ nc_get()
 ## Python
 
 ```{python}
-eg_xr.attrs
+cesm1_da.attrs
+cesm1_da.units
+cesm1_da.attrs['units']
+
+cesm1_da.long_name
 ```
 
 :::
@@ -317,8 +330,9 @@ plot(st_geometry(coasts180))
 ## Python
 
 ```{python}
-# todo
-
+cesm_180 = cesm_mf.copy()
+cesm_180.coords['lon'] = (cesm_180.coords['lon'] + 180) % 360 - 180
+cesm_180 = cesm_180.sortby(cesm_180.lon)
 ```
 
 :::
