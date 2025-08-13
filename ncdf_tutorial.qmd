@@ -1,0 +1,1058 @@
+---
+title: "A field guide to netCDF (for climate model output)"
+format: 
+  html:
+    page-layout: full
+    title-block-banner: true
+toc: true
+toc-expand: 2
+execute:
+  eval: false
+---
+
+
+How I use this document: I click the tab I want (R or python), and control-F to find the operation I'm looking for.
+
+<details>
+  <summary>Click here for optional background</summary>
+
+  Climate model output is often represented as a three-dimensional spatiotemporal data cube -- we work with 2-dimensional maps representing a single point in time, so that looking at multiple time points gives us a 3d cube^[This is frequently extended to higher dimensions, e.g., if our climate variable is recorded at different elevations. We're not going to worry about those right now]. This data is frequently recorded in the `netCDF` file format, which end in file extension `.nc`. One nice feature of NetCDFs is that they are self-contained, as they include all of the relevant metadata inside of the file itself. Another nice feature is that you can easily access arbitrary subsets of the data, for convenient lazy loading. Python has great, straightforward support for netCDF -- the community has really rallied around the `xarray` package, and `xarray` was pretty much designed for netCDFs.
+
+
+
+In R, things are a little more complicated. A lot of the support for spatiotemporal data in R doesn't come from people working with netCDFs, but from different communitities (e.g. demographers, remote sensing people, everyone that loves GIS). As a result, the popular spatiotemporal packages are designed for super general purpose use. We can almost certainly do all the same netCDF-based analysis as in python, but the documentation for netCDF operations is not as nice. 
+
+Another complicating aspect with working with netCDF in R is that there are multiple packages out there to use, and the ones being actively developed are relatively new. Here's a quick rundown: 
+
+- `terra` is the most general and most powerful package, and it's what I prefer to use in R. It's built as an alternative to the old `raster` package, which used to be popular back in the day.
+
+- `stars` is made more specifically for "data cubes". Probably the closest philisophically aligned to xarray, but it's more general than xarray (in particular, in its abiltiy to handle weird curved grids). 
+
+- `tidync` is made specifically for netCDF files, and it does a good job at picking out the grid of data that we want It's really good at what it does (reading in a netCDF file and taking subsets of it), but the package doesn't do much more than that. As the name suggests, I think this tool is best if your data fits in memory in "long" format (i.e. a dataframe with 1 row per (lat, lon, time)). 
+
+In summary: I think `terra` is the best package for our purposes (i.e working with nicely gridded netCDF). `stars` is cool but is missing a bunch of functionality and documentation (as of this writing). `tidync` is amazing at what it does (i.e. identifying dimensions / lazy filtering), but is too barebones for analysis. It's also worth mentioning that `stars` and `tidync` sometimes make use of the `cubelyr` package, which isn't actively maintained (although it's quite nice).  It's also worth mentioning the low-level packages that are often working under the hood: `sf` is a general spatial package in R that gives us the data class we often store our objects in, and `RNetCDF` is a really low-level package for reading in netcdf data, and `ncdf4` is a little more high level and is still useful for grabbing things like metadata.
+
+
+  
+</details>
+
+
+## Preliminaries
+
+To start, let's load a bunch of packages and get some utilities
+
+::: {.panel-tabset group="language"}
+
+
+## R
+
+```{r}
+# global utils
+library(tidyverse)
+library(here)
+library(rnaturalearth)
+
+# specific R utils
+library(tidync)
+library(stars)
+library(terra)
+
+# helper function
+lon_to_180 <- function(lon360){
+  ifelse(lon360 > 180, lon360 - 360, lon360)
+}
+
+# example data
+coasts <- ne_coastline(returnclass = 'sf')
+
+
+```
+
+## Python
+
+```{python}
+#| code-fold: true
+
+import xarray as xr
+import matplotlib.pyplot as plt
+```
+
+:::
+
+Let's grab some netCDF files to play with. For demonstration purposes, we'll use a land temperature product -- NASA GISSTEMP (qfe is a quality control adjusted version).  I'm just going to download this one using good old fashioned wget
+
+Let's grab two more files -- two decades of monthly data from a CESM2 historical run, accessed from [here](https://rda.ucar.edu/). Again pulling 2m air temperature. 
+
+(aside: I find this cesm [data dictionary](https://www.cesm.ucar.edu/community-projects/lens2/output-variables) extremely helpful)
+
+
+::: {.panel-tabset group="language"}
+
+
+## R
+
+```{r}
+#| eval: false
+#| code-fold: true
+
+# GISTEMP ------------------------------------------------------
+gistemp_url <- 'https://data.giss.nasa.gov/pub/gistemp/gistemp250_GHCNv4.nc.gz'
+
+# downloads into the working directory
+download.file(gistemp_url, destfile = here('ghcn_demo.nc.gz'))
+# unzip the file
+R.utils::gunzip(here('ghcn_demo.nc.gz'), remove = FALSE)
+ghcn_path <- here('ghcn_demo.nc')
+
+
+# CESM ----------------------------------------------------------
+
+# 2010-2014
+cesm_url <- 'https://data-osdf.rda.ucar.edu/ncar/rda/d651056/CESM2-LE/atm/proc/tseries/month_1/TREFHT/b.e21.BHISTcmip6.f09_g17.LE2-1001.001.cam.h0.TREFHT.201001-201412.nc'
+download.file(cesm_url, destfile = here('cesm_demo.nc'), method = 'wget')
+
+# 2000-2009
+cesm_url2 <- 'https://data-osdf.rda.ucar.edu/ncar/rda/d651056/CESM2-LE/atm/proc/tseries/month_1/TREFHT/b.e21.BHISTcmip6.f09_g17.LE2-1001.001.cam.h0.TREFHT.200001-200912.nc'
+download.file(cesm_url2, destfile = here('cesm_demo2.nc'), method = 'wget')
+
+
+cesm_paths <- c(here('cesm_demo.nc'), here('cesm_demo2.nc'))
+
+
+```
+
+## Python
+
+
+```{python}
+# todo 
+```
+
+
+:::
+
+
+# Reading files
+
+Let's start with the cesm file for our demo, assuming that there's a single variable that we're interested in, TREFHT. Compare to the output after reading in the GISTEMP data.
+
+
+## Reading in a single netcdf
+
+::: {.panel-tabset group="language"}
+
+## R
+
+
+```{r}
+
+
+# terra
+cesm_terra <- rast(cesm_paths[1], subds = 'TREFHT')
+gistemp_terra <- rast(ghcn_path, subds = 'tempanomaly')
+
+
+## this might be equivalent?
+# cesm_terra <- rast(cesm_path)
+# cesm_terra_TREFHT <- subset(cesm_terra, 'TREFHT')
+
+
+# stars
+cesm_stars <- read_ncdf(cesm_paths[1], var = 'TREFHT', proxy = F)
+gistemp_stars <- read_ncdf(ghcn_path, var = 'tempanomaly', proxy = F)
+
+
+# tidync
+cesm_tnc <- tidync(cesm_paths[1])
+gistemp_tnc <- tidync(ghcn_path)
+
+
+```
+
+
+## Python 
+
+```{python}
+eg_path = "~/Downloads/b.e21.B1850cmip6.f09_g17.CESM2-SF-AAER.001.cam.h1.TREFHT.20100101-20141231.nc"
+eg_xr = xr.open_dataset(eg_path)
+eg_xr = eg_xr['TREFHT']
+```
+
+:::
+
+## Reading multiple netcdf
+
+Large netCDFs are often split up into multiple files, with each file representing a time chunk. For example, in the CESM files downloaded above, one file represents monthly output for 2000-2010, and the other file represents monthly output for 2010-2014. The two files live on identical grids, so it makes sense to combine them into a single object. (if the two files live on different grids, see @sec-regridding and @sec-reprojection)
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+
+## terra
+
+all_cesm <- rast(cesm_paths) # recall, cesm_paths is a vector containing two files
+
+# if we already have two rasters read in, we can combine them
+cesm1 <- rast(cesm_paths[1], subds = 'TREFHT')
+cesm2 <- rast(cesm_paths[2], subds = 'TREFHT')
+all_cesm_alt <- c(cesm1, cesm2)
+
+
+## stars
+
+all_cesm_stars <- read_stars(cesm_paths)
+
+
+
+```
+
+## Python
+
+```{python}
+eg_mf = xr.open_mfdataset(string_with_wildcards or [list, of, files])
+```
+
+:::
+
+# Looking at metadata
+
+e.g. finding the units of a variable
+
+::: {.panel-tabset group="language"}
+
+## R
+
+I like the `ncmeta` package for this in R, but each R package has their own way of doing this.
+
+```{r}
+
+
+# terra
+
+units(cesm_terra)
+time(cesm_terra)
+varnames(cesm_terra)
+longnames(cesm_terra)
+metags(cesm_terra)
+
+
+# ncmeta
+
+ncmeta::nc_att(path)
+print(ncdf4::nc_open(path))
+
+# tidync
+
+hyper_vars()
+nc_get()
+
+# stars
+
+
+```
+
+## Python
+
+```{python}
+eg_xr.attrs
+```
+
+:::
+
+# Preprocessing
+
+## Switching between (-180, 180) and (0, 360) lon
+
+I think climate model data is usually in the (0, 360) space, but everything else is in the (-180, 180) space.
+
+Below is code to just do this reshift. For point data (e.g climate model output), this is trivial, we can just shift the longitude values over. But for polygons, this is really tricky, because you need to make sure you respect the prime meridian when you shift over.
+
+
+In general, my recommendation is to move the climate model output to (-180, 180), NOT move the observational data to (0, 360).
+
+
+::: {.panel-tabset group="language"}
+
+## R 
+
+If you want more complex reprojections, see [here](https://r.geocompx.org/reproj-geo-data)
+
+```{r}
+# terra
+cesm180 <- rotate(cesm_terra)  # recall: cesm_terra is in (0, 360)
+
+
+## BONUS: an alternate approach using just sf ---------------
+
+# pak::pkg_install('lwgeom') 
+library(lwgeom) # useful for st_wrap_x, https://github.com/r-spatial/sf/issues/2058
+
+# example data, which is in (-180, 180)
+coasts <- ne_coastline()
+plot(st_geometry(x))
+
+# Shift from -180 - 180 to 0 - 360
+coasts360 <- st_wrap_x(coasts, 0, 360)
+plot(st_geometry(coasts360))
+
+# Shift from 0 - 360 to -180 - 180
+# cutline at x = 180
+# move things to the left of the cutline by 360
+# then move everything left by 360
+coasts180 <- st_wrap_x(coasts360, 180, 360)
+st_geometry(coasts180) <- st_geometry(coasts180) - c(360, 0)
+plot(st_geometry(coasts180))
+
+
+
+## bonus bonus: I think these are also supposed to work, but I couldn't figure it out. -----------
+
+# coasts180 <- st_wrap_dateline(coasts360, options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
+# coasts180 <- st_shift_longitude(coasts360)
+
+```
+
+## Python
+
+```{python}
+# todo
+
+```
+
+:::
+
+
+## Detrending  {#sec-detrending}
+
+Detrending commonly refers to removing a linear time trend.
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+
+
+# terra
+
+## method 1
+poly_coef <- regress(cesm_terra, 1:nlyr(cesm_terra), formula = y~x)$x
+time_predictor_rast <- rast(cesm_terra) # empty rast with the right dims
+for (i in 1:nlyr(cesm_terra)) {
+  time_predictor_rast[[i]] <- as.numeric(time(cesm_terra)[i])
+}
+fitted_vals <- poly_coef[['(Intercept)']] +
+  poly_coef[['x']] * time_predictor_rast
+
+no_trend <- cesm_terra - fitted_vals
+
+
+## method 2: I think slower, but I'm not sure
+
+#' x and y are both vectors of equal length, representing time series
+detrend_cell <- function(rast_cell, x){
+  # for masked areas, just return NA
+  if (sum(!is.na(y_values)) < 2) {
+    return(NA)
+  }
+  
+  mod <- lm(y,x)
+  fitted_vals <- predict(mod)  
+  fitted_vals
+}
+
+no_trend <- app(cesm_terra, \(y) detrend_cell(y, x = 1:nlyrs(cesm_terra)))
+
+
+
+
+
+# eg_trend <- x * poly_coef # does this work?
+# eg_trend <- predict(poly_coef) # i doubt this works, but worth a shot.
+
+
+```
+
+## Python
+
+```{python}
+poly_coef = eg_xr.polyfit(dim='time', deg=1)['polyfit_coefficients']
+eg_trend = xr.polyval(eg_xr.time, poly_coef)
+eg_anoms = eg_xr - eg_trend
+```
+
+:::
+
+## Removing the seasonal cycle
+
+Method 1: by removing climatological means 
+
+Shown here for monthly data, but similar code works for different timescales
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+# terra
+
+# tapp is probably useful here
+```
+
+## Python
+
+```{python}
+# todo
+```
+
+:::
+
+
+Method 2: by fourier basis
+
+::: {.panel-tabset group="language"}
+
+## R
+
+
+```{r}
+# todo
+```
+
+
+## Python
+
+
+```{python}
+# todo
+```
+
+:::
+
+
+## Regridding {#sec-regridding}
+
+Going coarser, e.g going from 1 degree (CESM LENS) to 2 degree (NASA GISTEMP)
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+# terra
+
+coarse_terra <- resample(cesm_terra, gistemp_terra, method = 'average')
+# aggregate() good if the lower resolution is a multiple of the larger
+
+
+# stars
+coarse_stars <- st_warp(src = cesm_stars, dest = gistemp_stars)
+
+
+```
+
+## Python
+
+
+```{python}
+# todo
+```
+
+:::
+
+going finer, e.g. going from 2 degree (GISTEMP) to 1 degree (CESM)
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+
+# terra
+fine_terra <- resample(gistemp_terra, cesm_terra, method = 'bilinear')
+
+
+
+# stars
+fine_stars <- st_warp(src = gistemp_stars, dest = cesm_stars, use_gdal = T, method = 'bilinear')
+
+```
+
+## Python
+
+
+```{python}
+# todo
+```
+
+:::
+
+## Reprojection to different coordinates {#sec-reprojection}
+
+Suppose you want to combine two rasters, but they're in different coordinate systems. Reprojection lets you change the coordinate system.
+
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+# terra
+st_transform(terra::crs(rast))
+# or resample?
+
+
+```
+
+## Python
+
+```{python}
+
+# todo
+```
+
+:::
+
+## Area weighting
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+
+# terra
+
+expanse(unit = 'km') #
+
+# old raster method  https://stackoverflow.com/a/55233039
+# try to adapt this to terrra
+r <- abs(init(raster(), 'y'))
+s <- stack(r, r, r)
+a <- area(s) / 10000
+y <- sm * a
+weighted_average <- cellStats(y, sum) / cellStats(a, sum)
+
+
+
+
+# stars
+
+st_area() # 
+
+
+```
+
+## Python
+
+
+```{python}
+# todo
+```
+
+:::
+
+
+# Subsetting
+
+
+## Pulling out a single pixel
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+la_lonlat <- c(-118.24368, 34.05223)
+
+# tidync
+la_tnc <- cesm_tnc %>%
+  hyper_filter(lat = index == which.min(abs(lat - la_lonlat[2])),
+               lon = index == which.min(abs(lon_to_180(lon) - la_lonlat[1])))
+
+# stars
+
+# a <- tibble(lon = la_lonlat[1], lat = la_lonlat[2])
+# la_sf <- st_as_sf(a, coords = c('lon', 'lat'))
+
+la_sfc <- st_point(la_lonlat) %>%
+  st_sfc(crs = st_crs(cesm_stars))
+
+# bilinear = F does nearest neighbor
+la_stars <- cesm_stars %>%
+  st_extract(la_sfc, bilinear = F) 
+
+
+# terra
+
+terra::extract(raster, points) # maybe points needs to be a spatVector? (via vect(points))
+
+# cesm_terra[1] # pull outs the first gridcell
+
+
+```
+
+## Python
+
+```{python}
+la_lonlat = [-118.24368, 34.05223]
+
+eg_xr.sel(lon=la_lonlat[0], lat=la_lonlat[1], method='nearest')
+```
+
+:::
+
+## Pulling out a single year
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+# tidync
+
+cesm_tnc %>%
+  hyper_filter(
+    time = year(time) == 2010
+  )
+
+# stars
+
+# dplyr way (requires cubelyr)
+year_stars1 <- cesm_stars %>%
+  filter(year(time) == 2010)
+
+# "base r" way
+time_vals <- st_get_dimension_values(cesm_stars, 'time') %>%
+  ymd()
+ind_2010 <- which(year(time_vals) == 2010)
+year_stars2 <- cesm_stars[,,,ind_2010]
+
+
+# terra
+
+cesm_terra %>%
+  subset(year(time(.)) == 2010)
+
+cesm_terra[[year(time(cesm_terra)) == 2010]] # alt
+
+
+# cesm_terra[[1]] # pulls out the first month
+```
+
+## Python
+
+```{python}
+eg_xr.sel(time=eg_xr['time.year'] == 2010)
+```
+
+:::
+
+## Region masking
+
+Suppose you have a polygon (or shapefile, ect) that you want to subset by.
+
+::: {.panel-tabset group="language"}
+
+## R 
+
+```{r}
+# using the US as an example.
+usa <- ne_countries(country = 'United States of America')
+usa360 <- st_wrap_x(usa, 0, 360)
+
+
+
+# stars
+usa_stars <- cesm_stars %>%
+  st_crop(usa360)
+
+# terra
+
+terra::crop(SpatRaster, sf)
+
+# or extract?
+
+# or mask?
+
+countries <- geodata::world(resolution = 5, path = "maps") # get land map
+terra::mask(cesm_terra, countries)
+
+```
+
+## Python
+
+
+```{python}
+# todo
+```
+
+:::
+
+
+## Subsetting based on a lon/lat box
+
+Suppose we're interested in the southwestern US, maybe defined as the box between 124-105E and 32-45N
+
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+
+# tidync
+sw_tnc <- cesm_tnc %>%
+  hyper_filter(
+    lon = lon >= 105 & lon <= 124,
+    lat = lat >= 32 & lat <= 45
+  )
+
+# stars
+
+sw_box <- c(xmin= 105, xmax = 124, ymin = 32, ymax = 45)
+sw_bbox <- st_bbox(sw_box, crs = st_crs(cesm_stars))
+
+sw_stars <- st_crop(cesm_stars, sw_bbox)
+## check our work
+# st_get_dimension_values(sw_stars, 'lon')
+# st_get_dimension_values(sw_stars, 'lat')
+
+# terra
+
+r1 <- crop(cesm_terra, ext(-50,0,0,30))
+
+# cesm_terra[,1], pulls out a single latitude (a lon x time matrix)
+# cesm_terra[1,] pulls out a single longitude (a lat x time matrix)
+```
+
+## Python
+
+
+```{python}
+# todo
+```
+
+:::
+
+# Averaging 
+
+## Averaging over time 
+
+(i.e. get one map with the temporal average)
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+# stars
+
+timeavg_stars <- cesm_stars %>%
+  st_apply(c('lon', 'lat'), mean, na.rm = T)
+
+
+# terra
+
+# each time point is a LAYER
+# and terra by default takes the layer-wise mean
+mean(eg_aod)
+
+
+# cesm_terra %>%
+#   app()
+
+# tidync (i.e. with the raw data cube, which would also work with stars)
+cesm_tnc %>%
+  hyper_tbl_cube() %>%
+  group_by(lat, lon) %>%
+  summarize(avg_map = mean(TREFHT))
+
+
+```
+
+
+## Python
+
+```{python}
+eg_xr.mean('time')
+```
+
+:::
+
+## Averaging over space 
+
+(i.e. get a single time series with the spatial average)
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+
+# stars
+
+spaceavg_stars <- cesm_stars %>%
+  st_apply('time', mean, na.rm = T)
+
+
+# terra
+cesm_terra %>%
+  global('mean', na.rm = T) %>%
+  mutate(time = ymd(time(cesm_terra))) 
+
+
+# tidync (i.e. with the raw data cube, which stars also supports in backend)
+cesm_tnc %>%
+  hyper_tbl_cube() %>%
+  group_by(time) %>%
+  summarize(avg_ts = mean(TREFHT))
+
+```
+
+## Python
+
+```{python}
+eg_xr.mean(dim=['lat', 'lon'])
+```
+
+:::
+
+## Monthly data -> Seasonal average
+
+Say, we want one value per year -- the June - August mean.
+
+::: {.panel-tabset group="language"}
+
+## R
+
+```{r}
+jja_months <- c(6,7,8)
+
+# stars
+
+spaceavg_stars <- cesm_stars %>%
+  filter(month(time) %in% jja_months) %>%
+  st_apply('time', mean, na.rm = T)
+
+
+# terra
+
+# https://stackoverflow.com/questions/73035913/r-computing-seasonal-raster-based-on-specified-months-in-r
+# tapp()
+
+spaceavg_terra <- cesm_terra %>%
+  subset(month(time(.)) %in% jja_months) %>%
+  mean()
+
+
+# tidync (i.e. with the raw data cube, which stars also supports in backend)
+
+
+# might need to self-implement mutate for this... or check out stars mutate.
+cesm_tnc %>%
+  hyper_tbl_cube() %>%
+  filter(month(time) %in% jja_months) %>%
+  group_by(year(time)) %>%
+  summarize(avg_jja = mean(TREFHT))
+
+
+
+
+```
+
+
+## Python
+
+```{r}
+
+```
+
+:::
+
+
+# Plotting
+
+## Plotting a single map
+
+::: {.panel-tabset group="language"}
+
+## R
+
+I'm extremely partial to `ggplot` for plotting, so all of these examples are ggplot based.
+
+```{r}
+
+# terra
+library(tidyterra)
+ggplot() + 
+  geom_spatraster(data = timeavg_terra) + 
+  scale_fill_viridis_c() +
+  # + coord_sf(xlim = c(105, 124), ylim = c(32, 45), expand = FALSE) # bonus: zoom into a latlon box
+
+
+
+# stars
+
+ggplot() +
+  geom_stars(data = timeavg_stars) +
+  scale_fill_viridis_c() + 
+  geom_sf(data = x360) + 
+  coord_sf()  
+  
+
+## Bonus! How to zoom into a lon-lat box:
+
+
+
+
+```
+
+
+## Python
+
+```{python}
+eg_xr.mean('time').plot()
+```
+
+
+::: 
+
+
+# Regression
+
+## Separate regressions for each gridcell
+
+In @sec-detrending, we saw how to regress a variable against time. Here, we consider regressing one variable against another.
+
+For our example, we're going to regress CESM temperature against GISTEMP temperature. Note that we're using the re-gridded GISTEMP data, so that the two rasters are on the same grid
+
+## R 
+
+If all we're interested in is the slope, then the `regress` function works well and is fast. But... if we want anything else (e.g. p-values, out of sample predictions), then the `regress` function isn't very useful.
+```{r}
+##  terra
+
+# method 1: if all we care about is the slope
+cesm_gistemp <- regress(cesm_terra, gistemp_terra, formula = y ~ x)
+cesm_gistemp$x # a map with the regression slope
+
+# method 2: if we need other regression output (or a different type of regression)
+x <- lapp(sds(p, r), \(x, y) {
+    sapply(1:nrow(x), \(i) {
+        coefficients(lm(b~a, data=data.frame(a=x[i,], b=y[i,])))
+        }) |> t()
+    })
+
+
+```
+
+# Conversion between data types
+
+We commonly represent spatiotemporal data cubes as matrices: one row per time point, and one column per spatial gridcell. How do we convert from our spatial objects (i.e. xarray, spatRaster) to this matrix form?
+
+::: {.panel-tabset group="language"}
+
+## R
+
+
+```{r}
+# terra -> matrix
+mat_terra <- values(cesm_terra)  # each row is a gridcell, each column is a timepoint
+t(mat_terra)  # n_time * n_gridcell representation
+
+```
+
+
+
+## Python
+
+```{python}
+# todo
+```
+
+
+:::
+
+
+
+
+
+
+```{r}
+#| code-fold: true
+#| code-summary: Bonus! in R, how do we convert between different spatial packages?
+# terra -> stars
+terra_to_stars <- st_as_stars(stars_to_terra)
+
+
+# stars -> terra
+
+# note: this only works if cesm_stars is *not* a stars proxy object!
+stars_to_terra <- as(cesm_stars, 'SpatRaster')
+
+# tidync -> stars
+
+
+  st_as_stars.tidync <- function(x, ...) {
+  ## x is a tidync
+  
+  ## ignore unit details for the moment
+  data <- lapply(tidync::hyper_array(x, drop = FALSE), 
+                 units::as_units)
+  ## this needs to be a bit easier ...
+  transforms <- tidync:::active_axis_transforms(x)
+  dims <- lapply(names(transforms), function(trname) {
+    transform <- transforms[[trname]] %>% dplyr::filter(selected)
+    values <- transform[[trname]]
+    if (length(values) > 1) {
+      stars:::create_dimension(
+        values = values)
+    } else {
+      ## a hack for now when there's only one value
+      structure(list(from = values, to = values, 
+                     offset = values, delta = NA_real_, 
+                     geotransform = rep(NA_real_, 6), 
+                     refsys = NA_character_, 
+                     point = NA, 
+                     values = NULL), 
+                class = "dimension")
+    }
+  })
+  names(dims) <- names(transforms)
+  if (length(transforms)>= 2L) {
+    r <- structure(list(affine = c(0, 0), 
+                 dimensions = names(dims)[1:2], 
+                 curvilinear = FALSE, class = "stars_raster"))
+  
+    attr(dims, "raster") <- r
+}  
+  geotransform_xy <- c(dims[[1]]$offset, dims[[1]]$delta, 0, dims[[2]]$offset, 0, dims[[2]]$delta)
+  dims[[1]]$geotransform <- dims[[2]]$geotransform <- geotransform_xy
+  structure(data, dimensions =   structure(dims, class = "dimensions"), 
+            class = "stars")
+  
+}
+
+# tnc_stars <- stars::st_as_stars(tnc_tib, dims = c('lon', 'lat', 'time'))
+tnc_stars <- st_as_stars.tidync(cesm_tnc)
+
+
+## stars implements mutate by going stars -> df -> dplyr::mutate -> stars. Here's how that looks.
+
+# stars to df
+stars_df <- stars:::to_df(cesm_stars) 
+
+# df BACK to stars (i.e., assumes that we started with a stars object called cesm_stars)
+df_stars <- stars_df %>%
+  set_dim(dim(cesm_stars)) %>%
+  st_as_stars(dimensions = st_dimensions(cesm_stars))
+
+# terra -> df
+
+tidyterra::as_tibble(cesm_terra, xy = T)
+
+```
+
