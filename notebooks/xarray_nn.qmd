@@ -1,0 +1,197 @@
+---
+title: "xarray + jax/pytorch"
+format: html
+embed-resources: true
+---
+
+# setup
+
+Let's do linear regression with extra steps, using a 2d convolutional neural network
+
+lets generate some dummy data -- we'll use the standard "(time, lat, lon)" xarray setup with two variables. `y` will be a linear combination of `x` with noise.
+
+
+```{python}
+
+import xarray as xr
+import numpy as np
+import torch
+import torch.nn as nn
+import xbatcher
+import hvplot.xarray
+
+
+# (time, lon, lat)
+n_time = 100
+n_lat = 32
+n_lon = 32
+x = np.random.randn(n_time, n_lat, n_lon).astype(np.float32)
+y = x * 0.5 + np.random.normal(0, 0.1, size=(n_time, n_lat, n_lon)).astype(np.float32)
+
+ds = xr.Dataset(
+    {
+        "x": (("time", "lat", "lon"), x),
+        "y": (("time", "lat", "lon"), y),
+    }
+)
+```
+
+
+## pytorch
+
+TODO: come back and rewrite this with less gross `squeeze`, and `unsqueze` calls. Might be better to just add the `channel` dimension to the xarray object as the outset.
+
+Mapping between the computer vision literature and xarray objects:
+
+- CNNs typically intake dimensions (batch, channel, height, width)
+- that's the equiv of (batch, variable, lat, lon)
+    - e.g. if $y$ was a linear combination of $x_1$ and $x_2$, then the first layer would have 2 channels and the last layer would still have one.
+
+`xbatcher` is a pretty slick package for dealing with batches, but they still expect us to do the "tensorizing" ourselves. 
+
+```{python}
+
+# hyperparams chosen basically at random haha..
+model = nn.Sequential(
+    # layer 1 (feature extraction)
+    nn.Conv2d(in_channels=1, out_channels=16, kernel_size=3, padding=1),
+    nn.ReLU(),
+    # layer 2, pt 2 boogaloo
+    nn.Conv2d(in_channels=16, out_channels=16, kernel_size=3, padding=1),
+    nn.ReLU(),
+    # output layer: collapse back to to 1 channel for prediction
+    nn.Conv2d(in_channels=16, out_channels=1, kernel_size=3, padding=1),
+)
+
+# learning rate chosen at random lol
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+criterion = nn.MSELoss()
+bgen = xbatcher.BatchGenerator(ds, input_dims={"time": 10, "lon": 32, "lat": 32})
+
+
+model.train()  # toggle "learning mode", e.g. batch normalization. does nothing here.
+for batch_ds in bgen:
+    # (batch, 1, 32, 32)
+    x_batch = torch.tensor(batch_ds["x"].values).unsqueeze(1)
+
+    # (batch, 1, 32, 32)
+    y_batch = torch.tensor(batch_ds["y"].values).unsqueeze(1)
+
+    optimizer.zero_grad()
+    preds = model(x_batch)  # (batch, 1, 32, 32)
+
+    loss = criterion(preds, y_batch)
+    loss.backward()
+    optimizer.step()
+
+print(f"Final Batch MSE: {loss.item()}")
+
+
+# make an example plot
+model.eval()  # toggle "eval mode", e.g. global normalization. does nothing here
+
+# get training x
+eg_map = ds.isel(time=0)  # pull out the first time point as an example
+fig_true = eg_map.hvplot.quadmesh(title="truth")
+
+## get prediction -----
+x_in = torch.tensor(eg_map["x"].values).unsqueeze(0).unsqueeze(0)
+with torch.no_grad():  # stop calculating gradients
+    y_pred = model(x_in).squeeze().numpy()
+
+# wrap back in xarray
+da_pred = xr.DataArray(
+    y_pred,
+    coords=eg_map.coords,  # steal from eg_map
+    dims=eg_map.dims,
+    name="y_pred0",
+)
+
+fig_pred = da_pred.hvplot.quadmesh(title="prediction")
+fig_diff = (eg_map - da_pred).hvplot.quadmesh(title="truth - pred")
+
+# side by side figures
+fig_true + fig_pred + fig_diff
+```
+
+## jax
+
+TODO: use xarray_jax
+
+I think we wouldn't have to fiddle around with getting all the dimensions to match if we used xarray_jax from the google team
+
+```{python}
+import jax
+import jax.numpy as jnp
+import equinox as eqx
+import optax
+
+# I think this could be way better with xarray_jax
+
+key = jax.random.PRNGKey(0)
+k1, k2, k3 = jax.random.split(key, 3)
+model = eqx.nn.Sequential(
+    [
+        # Equinox Conv2d expects inputs (Channel, Height, Width)
+        eqx.nn.Conv2d(in_channels=1, out_channels=16, kernel_size=3, padding=1, key=k1),
+        eqx.nn.Lambda(jax.nn.relu),
+        eqx.nn.Conv2d(in_channels=16, out_channels=16, kernel_size=3, padding=1, key=k2),
+        eqx.nn.Lambda(jax.nn.relu),
+        eqx.nn.Conv2d(in_channels=16, out_channels=1, kernel_size=3, padding=1, key=k3),
+    ]
+)
+
+optimizer = optax.adam(learning_rate=0.01)
+opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+
+
+@eqx.filter_jit
+def step(model, opt_state, x, y):
+    # loss is MSE, same as above
+    # vmap applies the model to every sample in the batch
+    loss_fn = lambda m: jnp.mean((jax.vmap(m)(x) - y) ** 2)  # or optax.squared_error()
+
+    # calculate loss and grad
+    loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
+
+    # run update
+    updates, opt_state = optimizer.update(grads, opt_state, model)
+    model = eqx.apply_updates(model, updates)
+
+    return loss, model, opt_state
+
+
+# bgen is same as above
+bgen = xbatcher.BatchGenerator(ds, input_dims={"time": 10, "lon": 32, "lat": 32})
+for batch in bgen:
+    # conv2d expects (batch, channel, lat, lon)
+    # We add the missing channel dim using [:, None]
+    x_batch = jnp.array(batch["x"].values)[:, None]
+    y_batch = jnp.array(batch["y"].values)[:, None]
+
+    loss, model, opt_state = step(model, opt_state, x_batch, y_batch)
+
+print(f"Final Batch MSE: {loss}")
+
+
+# prep example input (channel=1, lat, lon), so no time dim
+x_in = jnp.array(eg_map["x"].values)[None, ...]
+pred_jax = model(x_in)
+
+# Convert back to xarray for plotting
+da_pred_jax = xr.DataArray(
+    np.array(pred_jax).squeeze(),
+    coords=eg_map.coords,
+    dims=eg_map.dims,
+    name="prediction",
+)
+
+
+fig_pred_jax = da_pred.hvplot.quadmesh(title="prediction")
+fig_diff_jax = (eg_map - da_pred_jax).hvplot.quadmesh(title="truth - pred")
+
+# side by side figures
+fig_true + fig_pred_jax + fig_diff_jax
+```
+
+

@@ -1,0 +1,253 @@
+---
+title: "When to average a climate model ensemble?"
+embed-resources: true
+---
+
+Single model initial condition large ensembles (SMILEs) are useful tools in climate statistics.^[some of these ideas extend to the analysis of multi-model ensembles (ie. MIPs), but single-model ensembles are easier to think about, so we're going to restrict our attention]. At what point in the analysis should we average over the ensemble?
+
+- Option 1: average over all ensemble members first, then calculate a statistic on the ensemble mean
+- Option 2: analyze each ensemble member separately, then average the statistic
+- Option 3: stack all ensemble members together and analyze the combined ouptut
+
+How should we decide which to use?
+
+## Example 1: EOFs
+
+Let's calculate some EOFs on dummy data as a motivating example of why this matters
+
+```{python}
+from climate_notebooks import helpers
+from glob import glob
+import xarray as xr
+import polars as pl
+import xeofs as xe
+import numpy as np
+from pathlib import Path
+import hvplot.xarray
+import hvplot.polars
+import holoviews as hv
+
+# let's generate some data
+eg1_ds, eg1_signal_ds = helpers.generate_ensemble_xr()
+
+eg1_signal_ds
+eg1_signal_mod = xe.single.EOF(n_modes=1, use_coslat=True)
+eg1_signal_mod.fit(eg1_signal_ds, dim="time")
+eg1_signal_pcs = eg1_signal_mod.scores(normalized=False).sel(mode=1)
+fig_signal = eg1_signal_pcs.hvplot.line(label="truth", color="black")
+```
+
+> Option 1: average over all ensemble members first, then calculate a statistic on the ensemble mean
+
+In this example, Option 1 entails calculating the ensemble mean (which, in this case, is a matrix indexed by (time, space)) and calculating EOFs.
+
+
+```{python}
+eg1_ensmean = eg1_ds.mean(dim="member")
+
+eg1_ensmean_mod = xe.single.EOF(n_modes=1, use_coslat=True)
+eg1_ensmean_mod.fit(eg1_ensmean, dim="time")
+
+eg1_ensmean_pcs = eg1_ensmean_mod.scores(normalized=False).sel(mode=1)
+fig_option1 = eg1_ensmean_pcs.hvplot.line(label = "option 1")
+
+```
+
+This is probably a terrible idea, because the phases of ENSO happen at different times for different ensemble members. If ensemble member 1 is in an La Nina phase in year 2000 and ensemble member 2 is in a El Nino phase in year 2000, then averaging between them will lose the spatial pattern
+
+> Option 2: analyze each ensemble member separately, then average the statistic
+
+In this example, Option 2 entails calculating EOFs on each ensemble member separately, then averaging the EOFs.
+
+```{python}
+member_pcs_list = []
+
+for m in eg1_ds.member.values:
+    member_da = eg1_ds.sel(member=m)
+    model = xe.single.EOF(
+        n_modes=1, use_coslat=True
+    )  # coslat doesn't matter for dummy data, just showing it off because it's useful
+    model.fit(member_da, dim="time")
+
+    pc = model.scores(normalized=False)
+    member_pcs_list.append(pc)
+
+# combine
+member_pcs_da = xr.concat(member_pcs_list, dim="member")
+
+
+# uncomment this line to see what the problem is!
+# member_pcs_da.sel(mode=1).hvplot.line(by = 'member')
+
+
+member_pcs_mean = member_pcs_da.mean(dim="member")
+fig_option2 = member_pcs_mean.sel(mode=1).hvplot.line(label="option 2")
+```
+
+
+The downside of this approach is that we need to be really careful. In this example, we have to be worried about EOFs doing different things in different ensemble members -- e.g. the EOFs might be sign-flipped, or maybe the ordering of EOFs might be different between models. With some work, some version of this approach can be feasible.
+
+The benefit of this approach, if we can get it to work, is that it gives us the easiest picture into the "sampling variability" of our statistic across ensemble members, without having to rely on extra assumptions.
+
+
+> Option 3: stack all ensemble members together and analyze the combined ouptut
+
+In this example, Option 3 entails stacking ensemble members along the time dimension and calculating EOFs on this `n_members` * `n_timepoints` * `n_gridcells` matrix. There's still an averaging step, but it happens after the EOFs are computed.
+
+```{python}
+# combine member and time into a single dimension
+eg1_stacked = eg1_ds.stack(sample=("member", "time"))
+model_combined = xe.single.EOF(n_modes=1, use_coslat=True)
+model_combined.fit(eg1_stacked, dim="sample")
+
+# pc1 is a really long "n_member * n_time" vector
+pc1_stacked = model_combined.scores(normalized=False).sel(mode=1)
+
+# unstack is so cool, I can't believe this works
+pc1_unstacked = pc1_stacked.unstack("sample")
+# pc1_unstacked.hvplot.line(by = 'member')
+
+# avg now
+pc1_option3 = pc1_unstacked.mean(dim="member")
+
+fig_option3 = pc1_option3.hvplot.line(label="option 3")
+```
+
+
+Plotting all three methods
+
+```{python}
+
+(fig_signal * fig_option1 * fig_option2 * fig_option3).opts(title="PC1 time series for the three options")
+```
+
+In this case, option 3 (stacking ensemble members) is my preference. Option 2 ()
+
+
+## Example 2: estimating skewness
+
+In this example, we estimate skewness at a single gridcell.
+
+Jensen's inequality tells us that $E[f(x)] \leq f(E[X])$, for nice functions $f$. $E[f(x)]$ corresponds to Option 2, where we take the ensemble mean at the last possible moment. $f(E[X])$ corresponds to Option 1, where we take the ensemble mean at the first possible moment. The gap between the two depends on the properties of the function, and we have to be especially careful of nonlinear functions of the data. Skewness is an example of such a non-linear function.
+
+```{python}
+# let's generate some data
+eg2_df, eg2_signal_df = helpers.generate_ensemble_ts(start_year=1960, end_year=1990, noise_sd=2)
+
+# # spaghet
+# eg2_df.hvplot.line(
+#     x="date",
+#     y="x",
+#     by="member",
+#     alpha=0.3,
+#     color="gray",
+#     legend=False,
+# )
+```
+
+> Option 1: average over all ensemble members first, then calculate a statistic on the ensemble mean
+
+In this example, 
+
+```{python}
+ensmean_df = eg2_df.group_by("date").agg(pl.col("x").mean().alias("ens_mean")).sort("date")
+
+eg1_option1 = (ensmean_df.select(pl.col("ens_mean").skew()).item())
+```
+
+> Option 2: analyze each ensemble member separately, then average the statistic
+
+In this example,
+
+```{python}
+
+eg2_option2_df = eg2_df.group_by("member").agg(pl.col("x").skew().alias("skew"))
+
+eg2_option2 = eg2_option2_df.select(pl.col("skew").mean()).item()
+```
+
+
+> Option 3: stack all ensemble members together and analyze the combined ouptut
+
+In this example, 
+
+```{python}
+eg2_option3 = eg2_df.select(pl.col("x").skew()).item()
+```
+
+
+For comparison, let's do this a bunch of times!
+
+```{python}
+def eg2_sim():
+    df, signal_df = helpers.generate_ensemble_ts(start_year=1960, end_year=1990, noise_sd=3)
+
+    # option 1
+    ensmean_df = df.group_by("date").agg(pl.col("x").mean().alias("ens_mean")).sort("date")
+    option1 = ensmean_df.select(pl.col("ens_mean").skew()).item()
+
+    # option 2
+    option2_df = df.group_by("member").agg(pl.col("x").skew().alias("skew"))
+    option2 = option2_df.select(pl.col("skew").mean()).item()
+
+    # option 3
+    option3 = df.select(pl.col("x").skew()).item()
+
+    skew_est = pl.DataFrame({"option1": option1, "option2": option2, "option3": option3})
+    return skew_est
+
+
+n_sims = 1000
+eg2_sims_df = pl.concat([eg2_sim() for i in np.arange(n_sims)])
+
+fig_eg2_dist = eg2_sims_df.hvplot.kde().opts(ylabel="skewness", title=f"sampling distribution over {n_sims} replicates")
+
+
+fig_eg2_means = eg2_sims_df.mean().row(0)
+line1 = hv.VLine(fig_eg2_means[0])
+line2 = hv.VLine(fig_eg2_means[1])
+line3 = hv.VLine(fig_eg2_means[2])
+
+fig_eg2 = fig_eg2_dist * line1 * line2 * line3
+
+fig_eg2
+```
+
+Note that I'm purposefully using a pretty small dataset (31 years of monthly data). Method 2 is consistent, so given enough data,the mean estimate of skew should be fine.
+
+## General Considerations
+
+In a perfect world, we would be able to treat each ensemble member as an i.i.d sample from some underlying climate model distribution, i.e.
+
+$$
+\begin{aligned}
+X_{i,t,s} &= \mu_{t,s} + \epsilon_{i,t,s}\\
+\epsilon_{i,t,s} &\sim N(0, \sigma^2_{s,t})
+\end{aligned}
+$$
+
+where $X_{i,t,s}$ is some climate model output from ensemble member $i$ at time $t$ and location $s$, $\mu$ is the "true" output representing the underlying climate model physics, and $\epsilon$ is some zero mean spatiotemorally varying noise field.
+
+Option 1, taking the ensemble mean first, amounts to calculating $\overline{X_{t,s}}$, with the hopes that averaging over ensemble members will remove internal variability $\epsilon$ and leave us with just the signal $\mu_{t,s}$
+
+This can sometimes be reasonable, but it's dangerous and can often lead to dampening the signal
+
+<!-- To write EOFs into this example, let $X_i$ denote the spatiotemporal field in for ensemble member $i$. The goal of our analysis, then, is to estimate the eigenvectors of the covariance matrix. The problem is that with the way we've written things, $Cov(X_i)$, in general, will have very different spatiotemporal characteristics than $Cov(\bar X)$, because $\epsilon$ contains a lot of the interesting covariance information. -->
+
+Option 2, operating on individual ensemble members separately and then averaging at the end, is my default choice. It's generally a safe operation, the code translates well to working on observations. Howvever...it isn't the most efficient estimator, and you have to watch out for the edge cases like the sign flipping in our first example. It also really matters how many ensemble members you have! In general, the more members you have, the more "safe" Option 2 is.
+
+Option 3, stacking the ensemble, is the best option when it can be done correctly. The challenge is that it's not always obvious how to combine the ensemble to compute a pooled estimate. In our first example, if we had stacked the ensemble dimension along the spatial dimension instead of the time dimension, it would've probably given us really different results. The examples here were all using really really toy data which has iid noise, so stacking didn't seem so hard.
+
+For better understanding of this kind of thing, look to the literature on hierarchical models / partial pooling. Our case is easier because members of a SMILE *are* supposed to be random draws from the same distribution, in some sense. Option 2 amounts to "no pooling", while option 3 amount to "complete pooling". 
+
+It's important to note that for nonlinear estimators and the i.i.d case, option 2 can lead to more biased estimation than option 3 (e.g. work out estimation of $\theta = \mu^2$ via $\hat \theta = \bar x^2$). The reason why is because $var(\hat \theta)$ is way lower if we pool all the data together. But... if the ensemble members aren't effectively iid in the data that we're using, then option 2 will have way less bias than option 3 (and also, option 3 will be "confidently" incorrect)
+
+Also worth noting that theoretically, "no-pooling" (option 2) is never strictly preferred -- "partial pooling" is the way (cf stein)
+
+<!-- ## Takeaway  / general principles
+
+1. If the single model large ensemble is being used as a methodological testbed for use with observations, then option 2 is a no-brainer (i.e. analyzing each ensemble member separately, then looking at the distribution of the output over the ensemble). Practically, this is probably the best approach most of the time (for SMILEs and MIPs).
+
+2. If computation is not a concern, then stacking ensemble members along the time dimension (option 3) is a flexible approach, which provides the option for modeling the ensemble member dimension directly. In theory, this is probably the best approach most of the time for SMILEs.
+
+3. Calculating the ensemble mean first then analyzing the output is ok as long as the statistic that we're interested in is *linear* and does not involve the spatio-temporal characteristics of the internal variability. (note jensen's inequality tells us why we'll get biased estimates for nonlinear functions) -->

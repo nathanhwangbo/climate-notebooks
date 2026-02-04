@@ -1,0 +1,45 @@
+[project]
+authors = [{name = "nathanhwangbo", email = "nathanhwangbo@gmail.com"}]
+dependencies = []
+name = "climate-notebooks"
+requires-python = ">= 3.11"
+version = "0.1.0"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64"]
+
+[tool.pixi.pypi-dependencies]
+climate_notebooks = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+
+[tool.pixi.dependencies]
+python = ">=3.14.2,<3.15"
+numpy = ">=2.3.5,<3"
+rasterio = ">=1.5.0,<2"
+dask = ">=2026.1.2,<2027"
+netcdf4 = ">=1.7.4,<2"
+h5netcdf = ">=1.8.1,<2"
+pyogrio = ">=0.12.1,<0.13"
+cartopy = ">=0.25.0,<0.26"
+xarray = ">=2026.1.0,<2027"
+regionmask = ">=0.13.0,<0.14"
+hvplot = ">=0.10.0,<0.13"
+geoviews = ">=1.5.0,<2"
+colorcet = ">=3.1.0,<4"
+flox = ">=0.10.8,<0.11"
+xeofs = ">=3.0.4,<4"
+jupyter_bokeh = ">=4.0.5,<5"
+polars = ">=1.37.1,<2"
+torchvision = ">=0.25.0,<0.26"
+torchaudio = ">=2.10.0,<3"
+jax = ">=0.7.2,<0.8"
+equinox = ">=0.13.4,<0.14"
+xbatcher = ">=0.4.0,<0.5"
+optax = ">=0.2.6,<0.3"
+jupyter = ">=1.1.1,<2"
